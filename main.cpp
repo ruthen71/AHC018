@@ -9,6 +9,30 @@ using namespace std;
 
 #define rep(i, n) for (int i = 0; i < (n); i++)
 
+struct UnionFind {
+    std::vector<int> parents;
+
+    UnionFind() {}
+    UnionFind(int n) : parents(n, -1) {}
+
+    int leader(int x) { return parents[x] < 0 ? x : parents[x] = leader(parents[x]); }
+
+    bool merge(int x, int y) {
+        x = leader(x), y = leader(y);
+        if (x == y) return false;
+        if (parents[x] > parents[y]) std::swap(x, y);
+        parents[x] += parents[y];
+        parents[y] = x;
+        return true;
+    }
+
+    bool same(int x, int y) { return leader(x) == leader(y); }
+
+    int size(int x) { return -parents[leader(x)]; }
+
+    void init(int n) { parents.assign(n, -1); }  // reset
+};
+
 using i8 = int8_t;
 using i16 = int16_t;
 using i32 = int32_t;
@@ -18,14 +42,58 @@ using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
-#include "data_structure/segment_tree.hpp"
-#include "algebra/monoid_min_index.hpp"
-
-#include "data_structure/unionfind.hpp"
+using Double = double;
+const Double EPS = 1e-8;
+inline int sign(const Double& x) { return x <= -EPS ? -1 : (x >= EPS ? 1 : 0); }
+inline bool equal(const Double& a, const Double& b) { return sign(a - b) == 0; }
 
 constexpr int dx[8] = {1, 0, -1, 0, 1, -1, -1, 1};
 constexpr int dy[8] = {0, 1, 0, -1, 1, 1, -1, -1};
+vector<vector<int>> permutation_4;
 constexpr int INF = 1 << 30;
+const int N2 = 200 * 200;
+
+constexpr int S_PRED_INIT = 30;
+const Double S_PRED_LOWER_BOUND_PARAM = 0.6;
+const Double S_DIFFERENTIAL_PARAM = 0.2;
+
+// Random
+const int MAX_RAND = 1 << 30;
+struct Rand {
+    i64 x, y, z, w, o;
+    Rand() {}
+    Rand(i64 seed) {
+        reseed(seed);
+        o = 0;
+    }
+    inline void reseed(i64 seed) {
+        x = 0x498b3bc5 ^ seed;
+        y = 0;
+        z = 0;
+        w = 0;
+        rep(i, 20) mix();
+    }
+    inline void mix() {
+        i64 t = x ^ (x << 11);
+        x = y;
+        y = z;
+        z = w;
+        w = w ^ (w >> 19) ^ t ^ (t >> 8);
+    }
+    inline i64 rand() {
+        mix();
+        return x & (MAX_RAND - 1);
+    }
+    inline int nextInt(int n) { return rand() % n; }
+    inline int nextInt(int L, int R) { return rand() % (R - L + 1) + L; }
+    inline int nextBool() {
+        if (o < 4) o = rand();
+        o >>= 2;
+        return o & 1;
+    }
+    double nextDouble() { return rand() * 1.0 / MAX_RAND; }
+};
+Rand my(2023);
 
 struct Pos {
     i32 x, y;
@@ -37,40 +105,34 @@ ostream& operator<<(ostream& os, const Pos& p) { return os << "(" << p.x << "," 
 
 enum class Response { not_broken, broken, finish, invalid };
 
-inline i32 mdis(const Pos& p1, const Pos& p2) {
-    // show(p1, p2);
-    return abs(p1.x - p2.x) + abs(p1.y - p2.y);
-}
+inline i32 mdis(const Pos& p1, const Pos& p2) { return abs(p1.x - p2.x) + abs(p1.y - p2.y); }
 
 struct Solver {
-    const int N = 200;
-    const int N2 = 200 * 200;
-    int W, K, C;
+    int N, W, K, C;
     vector<Pos> source_pos, house_pos;
 
     vector<vector<int>> is_broken;
     int total_cost;
 
-    using S_t = double;
-
-    vector<Pos> house_near_pos;
-    vector<int> house_connected;
-    vector<vector<S_t>> S_allinfo;
-    vector<vector<int>> is_source;
+    vector<Pos> house_near_pos;   // 各家からもっとも近い水のある地点
+    vector<int> house_connected;  // 各家が既に水と繋がっているか
+    vector<vector<int>> s_predicted;
 
     UnionFind uf;
+    vector<vector<int>> is_source;
 
-    Solver(int W, int K, int C, const vector<Pos>& source_pos, const vector<Pos>& house_pos)
-        : W(W),
+    Solver(int N, int W, int K, int C, const vector<Pos>& source_pos, const vector<Pos>& house_pos)
+        : N(N),
+          W(W),
           K(K),
           C(C),
           source_pos(source_pos),
           house_pos(house_pos),  //
           is_broken(N, vector<int>(N, 0)),
-          S_allinfo(N, vector<S_t>(N, 100)),
           total_cost(0),
           house_near_pos(K),
           house_connected(K, 0),
+          s_predicted(N, vector<int>(N, -1)),
           is_source(N, vector<int>(N, 0)),
           uf(N2 + 1) {
         for (int i = 0; i < K; i++) {
@@ -84,11 +146,11 @@ struct Solver {
         for (int i = 0; i < W; i++) {
             is_source[source_pos[i].x][source_pos[i].y] = 1;
         }
-        // show(house_near_pos);
+        show(house_near_pos);
     }
 
     void solve() {
-        for (int tt = 0; tt < K; tt++) {
+        while (true) {
             int ind = -1;
             for (int i = 0; i < K; i++) {
                 if (house_connected[i]) continue;
@@ -98,12 +160,13 @@ struct Solver {
                     ind = i;
                 }
             }
+
+            if (ind == -1) {
+                break;
+            }
             // process
             house_connected[ind] = 1;
             move(house_pos[ind], house_near_pos[ind]);
-            if (tt == K - 2) {
-                // show(S_allinfo);
-            }
         }
 
         // assert(false);
@@ -112,109 +175,81 @@ struct Solver {
     void move(const Pos& start, const Pos& goal) {
         // make function for comment cout?
         cout << "# move from (" << start.x << "," << start.y << ") to (" << goal.x << "," << goal.y << ")" << endl;
-        constexpr int N2 = 200 * 200;  // N * N
-        vector<pair<int, int>> init(N2);
-        vector<vector<int>> g(N, vector<int>(N)), h(N, vector<int>(N));
-        rep(i, N) {
-            rep(j, N) {
-                g[i][j] = mdis(Pos(i, j), start) * 100;
-                h[i][j] = mdis(Pos(i, j), goal) * 100;
-                if (is_broken[i][j]) {
-                    init[i * N + j] = {INF, i * N + j};
-                } else {
-                    init[i * N + j] = {g[i][j] + h[i][j] + S_allinfo[i][j], i * N + j};
-                }
-            }
-        }
-        SegmentTree<MonoidMinIndex<int>> seg(init);
-        while (true) {
-            auto [f, inj] = seg.all_prod();
-            int i = inj / N, j = inj % N;
-            if (is_broken[i][j]) {
-            }
-            int power_res = destruct(i, j);
-            if (power_res != 0) {
-                S_allinfo[i][j] = power_res;
-            }
-            rep(k, 4) {
-                int nx = i + dx[k], ny = j + dy[k];
-                if (is_broken[nx][ny]) {
-                    uf.merge(nx * N + ny, inj);
-                }
-            }
-            if (is_source[i][j]) {
-                uf.merge(inj, N2);
-            }
-            if (uf.same(start.x * N + start.y, N2)) {
-                // already broken
-                break;
-            }
-            // update
-            seg.set(inj, {INF, inj});
-            rep(k, 8) {
-                int nx = i + dx[k], ny = j + dy[k];
-                if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
-                if (is_broken[nx][ny]) continue;
-                int s_around_sum = 0, s_around_count = 0;
-                rep(l, 8) {
-                    int rx = nx + dx[l], ry = ny + dy[l];
-                    if (!(0 <= rx and rx < N and 0 <= ry and ry < N)) continue;
-                    s_around_sum += S_allinfo[rx][ry];
-                    s_around_count++;
-                }
-                S_allinfo[nx][ny] = S_t(s_around_sum) / s_around_count;
-                // show(S_allinfo[nx][ny]);
-                g[nx][ny] = min(g[nx][ny], f - h[i][j]);
-                init[nx * N + ny] = {g[nx][ny] + h[nx][ny] + S_allinfo[nx][ny], nx * N + ny};
-            }
-        }
+        destruct(start.x, start.y);
+        destruct(goal.x, goal.y);
+        int cx = start.x, cy = start.y;
+        while (!uf.same(cx * N + cy, N2)) {
+            array<pair<int, Pos>, 4> score_pos;
+            int score_pos_size = 0;
+            int p4_index = my.nextInt(24);
 
-        //// x
-        // if (start.x < goal.x) {
-        //    for (int x = start.x; x < goal.x; x++) {
-        //        destruct(x, start.y);
-        //    }
-        //} else {
-        //    for (int x = start.x; x > goal.x; x--) {
-        //        destruct(x, start.y);
-        //    }
-        //}
-        //// y
-        // if (start.y < goal.y) {
-        //    for (int y = start.y; y <= goal.y; y++) {
-        //        destruct(goal.x, y);
-        //    }
-        //} else {
-        //    for (int y = start.y; y >= goal.y; y--) {
-        //        destruct(goal.x, y);
-        //    }
-        //}
+            rep(k, 4) {
+                int nx = cx + dx[permutation_4[p4_index][k]], ny = cy + dy[permutation_4[p4_index][k]];
+                if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
+                if (mdis(Pos(nx, ny), goal) > mdis(Pos(cx, cy), goal)) continue;
+                destruct(nx, ny);
+                score_pos[score_pos_size++] = {s_predicted[nx][ny], Pos(nx, ny)};
+            }
+            int ind = 0;
+            rep(i, score_pos_size) {
+                if (score_pos[i].first < score_pos[ind].first) {
+                    ind = i;
+                }
+            }
+            cx = score_pos[ind].second.x;
+            cy = score_pos[ind].second.y;
+        }
     }
 
-    int destruct(int x, int y) {
+    void destruct(int x, int y) {
+        if (is_broken[x][y]) return;
+        Double s_pred_sum = 0;
+        int s_pred_count = 0;
+        rep(k, 8) {
+            int nx = x + dx[k], ny = y + dy[k];
+            if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
+            if (is_broken[nx][ny]) {
+                s_pred_sum += s_predicted[nx][ny];
+                s_pred_count++;
+            }
+        }
+
+        Double s_pred = s_pred_count == 0 ? S_PRED_INIT : s_pred_sum / s_pred_count;
+        int s_start = s_pred * S_PRED_LOWER_BOUND_PARAM;
+        int s_differential = s_pred * S_DIFFERENTIAL_PARAM;
+        int power = s_start;
         int current_power_sum = 0;
-        const int power = 10;
         while (!is_broken[x][y]) {
             Response result = query(x, y, power);
             if (result == Response::finish) {
                 // cerr << "total_cost=" << total_cost << endl;
                 exit(0);
             } else if (result == Response::invalid) {
-                // cerr << "invalid: y=" << y << " x=" << x << endl;
+                cerr << "invalid: y=" << y << " x=" << x << endl;
                 exit(1);
             }
             current_power_sum += power;
-            // power = min(power * 2, 5000 - current_power_sum);
-            // power = min(power, 5000 - current_power_sum);
+            power = s_differential;
+            power = min(power, 5000 - current_power_sum);
         }
+        s_predicted[x][y] = current_power_sum;
         for (int i = 0; i < K; i++) {
             if (house_connected[i]) continue;
             if (mdis(house_near_pos[i], house_pos[i]) > mdis(Pos(x, y), house_pos[i])) {
                 house_near_pos[i] = Pos(x, y);
             }
         }
-        S_allinfo[x][y] = current_power_sum;
-        return current_power_sum;
+        if (is_source[x][y]) {
+            uf.merge(x * N + y, N2);
+        }
+        rep(k, 4) {
+            int nx = x + dx[k], ny = y + dy[k];
+            if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
+            if (is_broken[nx][ny]) {
+                uf.merge(x * N + y, nx * N + ny);
+            }
+        }
+        return;
     }
 
     Response query(int x, int y, int power) {
@@ -240,6 +275,13 @@ struct Solver {
 int main() {
     ios::sync_with_stdio(false);
     cin.tie(0);
+    // generate permutation
+    vector<int> p(4);
+    iota(p.begin(), p.end(), 0);
+    do {
+        permutation_4.push_back(p);
+    } while (next_permutation(p.begin(), p.end()));
+
     // input
     int N, W, K, C;
     cin >> N >> W >> K >> C;
@@ -250,7 +292,7 @@ int main() {
     // show(N, W, K, C, source_pos, house_pos);
 
     // solver
-    Solver solver(W, K, C, source_pos, house_pos);
+    Solver solver(N, W, K, C, source_pos, house_pos);
     solver.solve();
     return 0;
 }
