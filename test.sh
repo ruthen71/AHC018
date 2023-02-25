@@ -6,7 +6,7 @@ for input in $(ls -1 ./in/*.txt); do
     output=`echo ${input} | cut -c 6-`
     echo ${output}
     cargo run --release --bin tester ../main < $input > ./out/$output
-    if [ "$output" = "0002.txt" ]; then
+    if [ "$output" = "0099.txt" ]; then
         echo "finish"
         break
     fi
