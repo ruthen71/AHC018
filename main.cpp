@@ -45,10 +45,6 @@ using i8 = int8_t;
 using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
-using u8 = uint8_t;
-using u16 = uint16_t;
-using u32 = uint32_t;
-using u64 = uint64_t;
 
 using Double = double;
 const Double EPS = 1e-8;
@@ -60,10 +56,13 @@ constexpr int dy[8] = {0, 1, 0, -1, 1, 1, -1, -1};
 constexpr int INF = 1 << 30;
 constexpr int N2 = 200 * 200;
 
-int S_PRED_INIT = 83;
-int S_ONCE = 36;
-Double S_PRED_LOWER_BOUND_PARAM = 0.828766868664498;
-Double S_DIFFERENTIAL_PARAM = 0.13338157810867157;
+int S_PRED_INIT = 105;
+int S_ONCE = 25;
+Double S_PRED_LOWER_BOUND_PARAM = 0.8301;
+Double S_DIFFERENTIAL_PARAM = 0.1413;
+Double DIRECTION_CHANGE_FREQUENCY_C = 0.0234;
+Double DIRECTION_CHANGE_FREQUENCY_MAG = 0.0758;
+int DIRECTION_CHANGE_FREQUENCY_CONST = 6;
 
 // Random
 const int MAX_RAND = 1 << 30;
@@ -116,6 +115,8 @@ enum class Response { not_broken, broken, finish, invalid };
 
 inline i32 mdis(const Pos& p1, const Pos& p2) { return abs(p1.x - p2.x) + abs(p1.y - p2.y); }
 
+inline i32 udis(const Pos& p1, const Pos& p2) { return i32(sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y))); }
+
 struct Solver {
     int N, W, K, C;
     vector<Pos> source_pos, house_pos;
@@ -129,6 +130,9 @@ struct Solver {
     vector<vector<int>> s_current_power;      // 各Sijに現在与えたダメージ量の総和
     vector<vector<int>> is_source, is_house;  // それぞれ水源マス, 家マスか
     UnionFind uf;
+
+    int magnification;  // マップの拡大率
+    int direction_change_frequency;
 
     Solver(int N, int W, int K, int C, const vector<Pos>& source_pos, const vector<Pos>& house_pos)
         : N(N),
@@ -228,12 +232,14 @@ struct Solver {
     }
 
     void excavation_cross() {
-        show("here");
+        vector<int> cross_length;
         for (int i = 0; i < W; i++) {
             destruct_all(source_pos[i].x, source_pos[i].y);
             rep(k, 4) {
                 int cx = source_pos[i].x + dx[k], cy = source_pos[i].y + dy[k];
+                int current_length = 0;
                 while (true) {
+                    current_length++;
                     if (!(x_lower_bound <= cx and cx <= x_upper_bound)) break;
                     if (!(y_lower_bound <= cy and cy <= y_upper_bound)) break;
                     destruct_once(cx, cy, S_ONCE);
@@ -243,13 +249,16 @@ struct Solver {
                         break;
                     }
                 }
+                cross_length.push_back(current_length);
             }
         }
         for (int i = 0; i < K; i++) {
             destruct_all(house_pos[i].x, house_pos[i].y);
             rep(k, 4) {
                 int cx = house_pos[i].x + dx[k], cy = house_pos[i].y + dy[k];
+                int current_length = 0;
                 while (true) {
+                    current_length++;
                     if (!(x_lower_bound <= cx and cx <= x_upper_bound)) break;
                     if (!(y_lower_bound <= cy and cy <= y_upper_bound)) break;
                     destruct_once(cx, cy, S_ONCE);
@@ -259,17 +268,56 @@ struct Solver {
                         break;
                     }
                 }
+                cross_length.push_back(current_length);
             }
         }
+        assert(cross_length.size() == 4 * (K + W));
+        sort(cross_length.rbegin(), cross_length.rend());
+        // set magnification, direction_chenge_frequency
+        magnification = cross_length[2 * (K + W)];
+        direction_change_frequency = DIRECTION_CHANGE_FREQUENCY_C * C + DIRECTION_CHANGE_FREQUENCY_MAG * magnification;
+        direction_change_frequency += DIRECTION_CHANGE_FREQUENCY_CONST;
+        direction_change_frequency = max(1, direction_change_frequency);
     }
 
     bool same(const Pos& a, const Pos& b) { return uf.same(a.x * N + a.y, b.x * N + b.y); }
+
+    vector<vector<Pos>> calc_connected_pos(vector<Pos>& current_pos) {
+        vector<vector<Pos>> connected_pos(current_pos.size());
+        rep(k, current_pos.size()) {
+            rep(i, N) {
+                rep(j, N) {
+                    if (same(current_pos[k], Pos(i, j))) {
+                        connected_pos[k].push_back(Pos(i, j));
+                    }
+                }
+            }
+        }
+        return connected_pos;
+    }
+
+    tuple<int, Pos, Pos> calc_closest_points(vector<Pos>& a, vector<Pos>& b) {
+        int min_distance = INF;
+        Pos argmin_pos1, argmin_pos2;
+        for (auto&& ai : a) {
+            for (auto&& bi : b) {
+                if (min_distance > udis(ai, bi)) {
+                    min_distance = udis(ai, bi);
+                    argmin_pos1 = ai;
+                    argmin_pos2 = bi;
+                }
+            }
+        }
+        return {min_distance, argmin_pos1, argmin_pos2};
+    }
 
     void solve() {
         init();
         excavation_cross();
         while (true) {
-            // shuffle(source_pos.begin(), source_pos.end(), my.nextInt(RAND_MAX));
+            random_device seed_gen;
+            mt19937 engine(seed_gen());
+            shuffle(source_pos.begin(), source_pos.end(), engine);
             vector<Pos> source_current_pos;
             for (int i = 0; i < W; i++) {
                 bool seen = false;
@@ -279,7 +327,7 @@ struct Solver {
                 if (seen) continue;
                 source_current_pos.push_back(source_pos[i]);
             }
-            // shuffle(house_pos.begin(), house_pos.end(), my.nextInt(RAND_MAX));
+            shuffle(house_pos.begin(), house_pos.end(), engine);
             vector<Pos> house_current_pos;
             for (int i = 0; i < K; i++) {
                 bool seen = false;
@@ -293,53 +341,31 @@ struct Solver {
                 house_current_pos.push_back(house_pos[i]);
             }
             if (house_current_pos.size() == 0) break;
-            vector<vector<Pos>> source_connected_pos(source_current_pos.size());
-            vector<vector<Pos>> house_connected_pos(house_current_pos.size());
-            rep(k, source_current_pos.size()) {
-                rep(i, N) {
-                    rep(j, N) {
-                        if (same(source_current_pos[k], Pos(i, j))) {
-                            source_connected_pos[k].push_back(Pos(i, j));
-                        }
-                    }
-                }
-            }
-            rep(k, house_current_pos.size()) {
-                rep(i, N) {
-                    rep(j, N) {
-                        if (same(house_current_pos[k], Pos(i, j))) {
-                            house_connected_pos[k].push_back(Pos(i, j));
-                        }
-                    }
-                }
-            }
+            // 点に対し、その点の連結成分を列挙
+            auto source_connected_pos = calc_connected_pos(source_current_pos);
+            auto house_connected_pos = calc_connected_pos(house_current_pos);
+
             int min_distance = INF;
             Pos argmin_pos1, argmin_pos2;
             // source and house
             rep(k, source_connected_pos.size()) {
                 rep(k2, house_connected_pos.size()) {
-                    for (auto&& source_p : source_connected_pos[k]) {
-                        for (auto&& house_p : house_connected_pos[k2]) {
-                            if (min_distance > mdis(source_p, house_p)) {
-                                min_distance = mdis(source_p, house_p);
-                                argmin_pos1 = source_p;
-                                argmin_pos2 = house_p;
-                            }
-                        }
+                    auto [d, a, b] = calc_closest_points(source_connected_pos[k], house_connected_pos[k2]);
+                    if (min_distance > d) {
+                        min_distance = d;
+                        argmin_pos1 = a;
+                        argmin_pos2 = b;
                     }
                 }
             }
             // house and house
             rep(k, house_connected_pos.size()) {
                 rep(k2, k) {
-                    for (auto&& house_p1 : house_connected_pos[k]) {
-                        for (auto&& house_p2 : house_connected_pos[k2]) {
-                            if (min_distance > mdis(house_p1, house_p2)) {
-                                min_distance = mdis(house_p1, house_p2);
-                                argmin_pos1 = house_p1;
-                                argmin_pos2 = house_p2;
-                            }
-                        }
+                    auto [d, a, b] = calc_closest_points(house_connected_pos[k], house_connected_pos[k2]);
+                    if (min_distance > d) {
+                        min_distance = d;
+                        argmin_pos1 = a;
+                        argmin_pos2 = b;
                     }
                 }
             }
@@ -352,25 +378,55 @@ struct Solver {
     void move(const Pos& start, const Pos& goal) {
         // make function for comment cout?
         cout << "# move from (" << start.x << "," << start.y << ") to (" << goal.x << "," << goal.y << ")" << endl;
-        // x
-        if (start.x < goal.x) {
-            for (int x = start.x; x < goal.x; x++) {
-                destruct_all(x, start.y);
+        int cx = start.x, cy = start.y;
+        int move_count = 0;
+        int dir = -1;
+        while (!same(Pos(cx, cy), goal)) {
+            move_count++;
+            vector<int> direction_index, direction_distance;
+            rep(k, 4) {
+                int nx = cx + dx[k], ny = cy + dy[k];
+                if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
+                if (mdis(Pos(cx, cy), goal) > mdis(Pos(nx, ny), goal)) {
+                    direction_index.push_back(k);
+                    direction_distance.push_back(abs(cx - goal.x) * abs(dx[k]) + abs(cy - goal.y) * abs(dy[k]));
+                }
             }
-        } else {
-            for (int x = start.x; x > goal.x; x--) {
-                destruct_all(x, start.y);
+            assert(direction_index.size() <= 2);
+            int index;
+            if (direction_index.size() == 1) {
+                index = direction_index[0];
+            } else {
+                if (move_count % direction_change_frequency == 0) {
+                    // direction chenge
+                    vector<int> direction_s;
+                    rep(k, 4) {
+                        int nx = cx + dx[k], ny = cy + dy[k];
+                        if (!(0 <= nx and nx < N and 0 <= ny and ny < N)) continue;
+                        if (mdis(Pos(cx, cy), goal) > mdis(Pos(nx, ny), goal)) {
+                            destruct_all(nx, ny);
+                            direction_s.push_back(s_current_power[nx][ny]);
+                        }
+                    }
+                    if (direction_s[0] < direction_s[1]) {
+                        index = direction_index[0];
+                        dir = direction_index[0];
+                    } else {
+                        index = direction_index[1];
+                        dir = direction_index[1];
+                    }
+                } else {
+                    if (dir == -1) {
+                        index = my.nextDouble() < (Double)direction_distance[0] / mdis(Pos(cx, cy), goal) ? direction_index[0] : direction_index[1];
+                        dir = index;
+                    } else {
+                        index = dir;
+                    }
+                }
             }
-        }
-        // y
-        if (start.y < goal.y) {
-            for (int y = start.y; y <= goal.y; y++) {
-                destruct_all(goal.x, y);
-            }
-        } else {
-            for (int y = start.y; y >= goal.y; y--) {
-                destruct_all(goal.x, y);
-            }
+            int nx = cx + dx[index], ny = cy + dy[index];
+            destruct_all(nx, ny);
+            cx = nx, cy = ny;
         }
     }
 
@@ -397,11 +453,14 @@ struct Solver {
 int main(int argc, char* argv[]) {
     ios::sync_with_stdio(false);
     cin.tie(0);
-    if (argc == 5) {
+    if (argc == 8) {
         S_PRED_INIT = atoi(argv[1]);
         S_ONCE = atoi(argv[2]);
         S_PRED_LOWER_BOUND_PARAM = atof(argv[3]);
         S_DIFFERENTIAL_PARAM = atof(argv[4]);
+        DIRECTION_CHANGE_FREQUENCY_C = atof(argv[5]);
+        DIRECTION_CHANGE_FREQUENCY_MAG = atof(argv[6]);
+        DIRECTION_CHANGE_FREQUENCY_CONST = atoi(argv[7]);
     }
     // input
     int N, W, K, C;
